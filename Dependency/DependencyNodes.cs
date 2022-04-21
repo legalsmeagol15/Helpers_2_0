@@ -92,6 +92,7 @@ namespace Helpers_2_0.Dependency
             
             for (int i = 0; i < nodes.Count; i++)
             {
+
                 var n = nodes[i];
                 // The indices in this group of nodes should all be relative to the parent index.
                 for (int j = 0; j < n.Listeners.Count; j++)
