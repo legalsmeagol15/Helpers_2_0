@@ -6,7 +6,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Threading.Channels;
 using Helpers;
-
+using System.Threading;
 
 namespace Helpers_2_0.Dependency
 {
@@ -38,6 +38,7 @@ namespace Helpers_2_0.Dependency
                 else
                     childValues[i] = input;
             }
+            this_node.InputValues = childValues.ToArray();
             this_node.Value = Fn(childValues);
             return this_node;
         }
@@ -60,9 +61,9 @@ namespace Helpers_2_0.Dependency
         private static readonly Channel<UpdateArgs> _Updates = Channel.CreateUnbounded<UpdateArgs>();
         public static readonly ChannelReader<UpdateArgs> Updates = _Updates.Reader;
 
-        private readonly List<DependencyNode> _Nodes = new();
-        private readonly DataStructures.SkipList<(int,int)> _Gaps = new();
-        private readonly List<object> _LockObjects = new();
+        private readonly object lockObj = new object();
+        private readonly List<DependencyNode> Heap = new();
+        private readonly DataStructures.SkipList<(int,int)> Gaps = new();
         private readonly Dictionary<string, int> Names = new();
         private class SizeComparer : IComparer<Tuple<int, int>>
         {
@@ -76,34 +77,49 @@ namespace Helpers_2_0.Dependency
         
         public DependencyNodeSet()
         {
-            _Gaps.Add((0, int.MaxValue));
+            Gaps.Add((0, int.MaxValue));
         }
         
         public int Add(string name, Expression e)
         {
             IList<DependencyNode> nodes = e.ToNodes(name);
+            int start_index;
+            (int, int) available;
 
-            // TODO:  is this backwards?  The one just "before" a gap of this size would be the first one too small?
-            if (!_Gaps.TryGetBeforeOrEqual((1, nodes.Count), out var available))
-                throw new Exception("No available gaps.");
-            int index = available.Item1;
-            _Gaps.Remove(available);
-
+            // Step #1 - Reserve a gap in which to put the new nodes.
+            var checkGap = (1, nodes.Count);
+            lock (lockObj)
+            {
+                // TODO:  is this backwards?  The one just "before" a gap of this size would be the first one too small?
+                if (!Gaps.TryGetBeforeOrEqual(checkGap, out available))
+                    throw new Exception("No available gaps.");
+                start_index = available.Item1;
+                Gaps.Remove(available);
+            }
             
+            // Step #2 - adapt the listeners' indices to the starting index, and copy onto the list.
             for (int i = 0; i < nodes.Count; i++)
             {
-
                 var n = nodes[i];
                 // The indices in this group of nodes should all be relative to the parent index.
                 for (int j = 0; j < n.Listeners.Count; j++)
-                    n.Listeners.Set(j, n.Listeners[j] + index);
+                    n.Listeners.Set(j, n.Listeners[j] + start_index);
                 // Copy the new nodes into position.
-                if (index + i < _Nodes.Count)
-                    _Nodes[index + i] = n;
+                if (start_index + i < Heap.Count)
+                    Heap[start_index + i] = n;
                 else
-                    _Nodes.Add(n);
+                    Heap.Add(n);
             }
-            return index;
+
+            // Step #3 - if there's any portion of the gap left, put it back on the node heap.
+            if (start_index + nodes.Count - 1 < available.Item2)
+            {
+                lock (lockObj)
+                {
+                    Gaps.Add((start_index + nodes.Count, available.Item2));
+                }
+            }
+            return start_index;
         }
         public void Update(int index)
         {
@@ -125,18 +141,19 @@ namespace Helpers_2_0.Dependency
         public string Name;
         public readonly DependencyFunction Fn;
         public object Value { get; internal set; }
-        internal readonly CacheFriendly.HotList3<ListenerLink> Listeners, Values;
-        
+        internal readonly CacheFriendly.HotList3<ListenerLink> Listeners, InputValues;
+        public readonly object LockObj;
         public bool IsLiteral => Fn == null;
         public bool IsHead => Name == null;
 
         public DependencyNode(string name, DependencyFunction fn)
         {
+            LockObj = new object();
             Name = name;
             Fn = fn;
             Value = null;
             Listeners = new();
-            Values = new();
+            InputValues = new();
         }
         
 
@@ -167,5 +184,5 @@ namespace Helpers_2_0.Dependency
         public UpdateArgs(int index, object oldValue = null, object newValue = null)
         { this.Index = index; this.OldValue = oldValue; this.NewValue = newValue; }
     }
-    public delegate object DependencyFunction(params object[] inputs);
+    
 }
